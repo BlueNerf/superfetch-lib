@@ -5,5 +5,5 @@
 #endif
 
 int main() {
-    Superfetch& superfetch = Superfetch::getInstance();
+    Superfetch& superfetch = Superfetch::GetInstance();
 }

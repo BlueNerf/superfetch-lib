@@ -2,71 +2,62 @@
 
 #include <iostream>
 #include <ntstatus.h>
-#include <vector>
 #include <Windows.h>
 #include <winternl.h>
 
 #include "nt.h"
 
-struct SFMemoryInfo
-{
-    uint64_t Start;
-    uint64_t End;
-    int PageCount;
-    uint64_t Size;
-};
-
 struct PfnList {
-    bool isPool;
-    std::uint32_t poolTag;
+    bool is_pool;
+    std::uint32_t pool_tag;
 };
 
 class Superfetch {
 public:
-    static Superfetch& getInstance() {
+    static Superfetch& GetInstance() {
         static Superfetch instance;
         return instance;
     }
 
-    [[nodiscard]] static int forceUpdateRanges() {
-        return QueryMemoryRanges(&superfetchPhysicalRanges);
+    [[nodiscard]] static int ForceUpdateRanges() {
+        return QueryMemoryRanges(&superfetch_physical_ranges_);
     }
 
     // Gets the raw
-    [[nodiscard]] const PPF_MEMORY_RANGE_INFO getRawMemoryRanges() const {
-        return superfetchPhysicalRanges;
+     [[nodiscard]] static PPF_MEMORY_RANGE_INFO GetRawMemoryRanges() {
+        return superfetch_physical_ranges_;
     }
 
     Superfetch(const Superfetch&) = delete;
     Superfetch& operator=(const Superfetch&) = delete;
 
 private:
-    int refCount = 0;
-    inline static PPF_MEMORY_RANGE_INFO superfetchPhysicalRanges;
-    inline static PPF_PFN_PRIO_REQUEST pPfnRanges;
+    int refCount_ = 0;
+    inline static PPF_MEMORY_RANGE_INFO superfetch_physical_ranges_;
+    inline static PPF_PFN_PRIO_REQUEST pfn_ranges_;
 
     Superfetch() {
-        refCount++;
+        refCount_++;
         int err{};
         try {
-            err = sfSetupPrivileges();
+            err = SfSetupPrivileges();
             if (err) { throw std::runtime_error("[iX] Failed to setup privileges (possibly need administrator privileges)"); };
-            err = sfSetupPages();
+            err = SfSetupPages();
             if (err) { throw std::runtime_error("[iX] Failed to setup superfetch pages"); }
         } catch (const std::runtime_error& e) {
             std::cerr << e.what() << "(error: " << err << ")" << std::endl;
 
-            superfetchPhysicalRanges = nullptr;
-            pPfnRanges = nullptr;
+            superfetch_physical_ranges_ = nullptr;
+            pfn_ranges_ = nullptr;
         }
     }
 
-    [[nodiscard]] int sfSetupPages() const
+    [[nodiscard]] static int SfSetupPages()
     {
-        auto iRangesResponse = QueryMemoryRanges(&superfetchPhysicalRanges);
-        if (iRangesResponse == 0) {
-            auto iPagesResponse = QueryMemoryPages(&pPfnRanges);
-            if (iPagesResponse == 0) {
+        auto ranges_response = QueryMemoryRanges(&superfetch_physical_ranges_);
+        if (ranges_response == 0) {
+            auto pages_response = QueryMemoryPages(&pfn_ranges_);
+            if (pages_response == 0) {
                 return 0;
             }
             return 2;
@@ -75,7 +66,7 @@ private:
         return 1;
     }
 
-    [[nodiscard]] static int sfSetupPrivileges() {
+    [[nodiscard]] static int SfSetupPrivileges() {
         BOOLEAN old;
         NTSTATUS status = RtlAdjustPrivilege(SE_PROF_SINGLE_PROCESS_PRIVILEGE, TRUE, FALSE, &old);
 
@@ -93,14 +84,17 @@ private:
         return 0;
     }
 
-    static NTSTATUS QuerySuperfetchInfo(SUPERFETCH_INFORMATION* superfetch_information) {
-        ULONG return_length = 0;
+    static NTSTATUS QuerySuperfetchInfo(SUPERFETCH_INFORMATION* superfetch_information, PULONG return_length) {
 
-        return NtQuerySystemInformation(SystemSuperfetchInformation, superfetch_information, sizeof(*superfetch_information), &return_length);
+        if (return_length != nullptr) {
+            return NtQuerySystemInformation(SystemSuperfetchInformation, superfetch_information, sizeof(*superfetch_information), return_length);
+        }
+        ULONG unused_return_length;
+        return NtQuerySystemInformation(SystemSuperfetchInformation, superfetch_information, sizeof(*superfetch_information), &unused_return_length);
     }
 
     template <typename T>
-    static SUPERFETCH_INFORMATION createSfInformation(SUPERFETCH_INFORMATION_CLASS superfetch_information_class, T* superfetch_information, SIZE_T superfetch_information_length) {
+    static SUPERFETCH_INFORMATION CreateSfInformation(SUPERFETCH_INFORMATION_CLASS superfetch_information_class, T* superfetch_information, SIZE_T superfetch_information_length) {
         SUPERFETCH_INFORMATION sf_information{};
         sf_information.Version                     = SUPERFETCH_VERSION;
         sf_information.Magic                       = SUPERFETCH_MAGIC;
@@ -111,31 +105,19 @@ private:
         return sf_information;
     }
 
-    // old function will update to use the helper functions soon
-    [[nodiscard]] static int QueryMemoryRanges(PPF_MEMORY_RANGE_INFO* pSuperfetchRanges) {
+    [[nodiscard]] static int QueryMemoryRanges(PPF_MEMORY_RANGE_INFO* superfetch_ranges) {
         PF_MEMORY_RANGE_INFO memory_range_info{};
         memory_range_info.Version = 2;
         memory_range_info.Flags   = 0;
 
-        SUPERFETCH_INFORMATION superfetch_information{};
-        superfetch_information.Version                     = SUPERFETCH_VERSION;
-        superfetch_information.Magic                       = SUPERFETCH_MAGIC;
-        superfetch_information.SuperfetchInformationClass  = SuperfetchMemoryRangesQuery;
-        superfetch_information.SuperfetchInformation       = &memory_range_info;
-        superfetch_information.SuperfetchInformationLength = sizeof(memory_range_info);
-
-        ULONG return_length = 0;
-        NTSTATUS st = NtQuerySystemInformation(
-            SystemSuperfetchInformation,
-            &superfetch_information,
-            sizeof(superfetch_information),
-            &return_length
-        );
+        SUPERFETCH_INFORMATION superfetch_information = CreateSfInformation(SuperfetchMemoryRangesQuery, &memory_range_info, sizeof(memory_range_info));
+        ULONG return_length;
+        NTSTATUS st = QuerySuperfetchInfo(&superfetch_information, &return_length);
 
         PPF_MEMORY_RANGE_INFO ranges = &memory_range_info;
 
         if (st == STATUS_BUFFER_TOO_SMALL) {
-            ranges = reinterpret_cast<PPF_MEMORY_RANGE_INFO>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, return_length));
+            ranges = static_cast<PPF_MEMORY_RANGE_INFO>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, return_length));
 
             ranges->Version = 2;
             ranges->Flags   = 0;
@@ -155,50 +137,49 @@ private:
             return -1;
         }
 
-        std::cout << "rangecount: " << ranges->RangeCount << std::endl;
-        *pSuperfetchRanges = ranges;
+        *superfetch_ranges = ranges;
         return 0;
     }
 
-    [[nodiscard]] static int QueryMemoryPages(PPF_PFN_PRIO_REQUEST* pSuperfetchPages) {
-        if (superfetchPhysicalRanges == nullptr) {
-            std::cout << "[X] Query ranges before setting up pages. (rangecount -> " << superfetchPhysicalRanges->RangeCount << ")"<< std::endl;
+    [[nodiscard]] static int QueryMemoryPages(PPF_PFN_PRIO_REQUEST* superfetch_pages) {
+        if (superfetch_physical_ranges_ == nullptr) {
+            std::cout << "[X] Query ranges before setting up pages. (rangecount -> " << superfetch_physical_ranges_->RangeCount << ")"<< std::endl;
             return -1;
         }
 
         PPHYSICAL_MEMORY_RUN physical_memory_run;
-        ULONG_PTR MmHighestPageNumber = 0;
-        for (ULONG i = 0; i < superfetchPhysicalRanges->RangeCount; i++) {
-            physical_memory_run = reinterpret_cast<PPHYSICAL_MEMORY_RUN>(&superfetchPhysicalRanges->Ranges[i]);
-            MmHighestPageNumber = physical_memory_run->BasePage + physical_memory_run->PageCount;
+        ULONG_PTR mm_highest_page_number = 0;
+        for (ULONG i = 0; i < superfetch_physical_ranges_->RangeCount; i++) {
+            physical_memory_run = reinterpret_cast<PPHYSICAL_MEMORY_RUN>(&superfetch_physical_ranges_->Ranges[i]);
+            mm_highest_page_number = physical_memory_run->BasePage + physical_memory_run->PageCount;
         }
-        auto PfnCount = MmHighestPageNumber;
-        auto MmPfnDatabaseSize = FIELD_OFFSET(PF_PFN_PRIO_REQUEST, PageIdentities) + PfnCount * sizeof(MMPFN_IDENTITY);
-        auto MmPfnDatabase = static_cast<PPF_PFN_PRIO_REQUEST>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, MmPfnDatabaseSize));
-        MmPfnDatabase->Version = 1;
-        MmPfnDatabase->RequestFlags = 1;
+        auto pfn_count = mm_highest_page_number;
+        auto mm_pfn_database_size = FIELD_OFFSET(PF_PFN_PRIO_REQUEST, PageIdentities) + pfn_count * sizeof(MMPFN_IDENTITY);
+        auto mm_pfn_database = static_cast<PPF_PFN_PRIO_REQUEST>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, mm_pfn_database_size));
+        mm_pfn_database->Version = 1;
+        mm_pfn_database->RequestFlags = 1;
 
-        SUPERFETCH_INFORMATION sf_info = createSfInformation(SuperfetchPfnQuery, MmPfnDatabase, MmPfnDatabaseSize);
+        SUPERFETCH_INFORMATION sf_info = CreateSfInformation(SuperfetchPfnQuery, mm_pfn_database, mm_pfn_database_size);
 
-        for (auto k = 0, i = 0; i < superfetchPhysicalRanges->RangeCount; i++) {
-            physical_memory_run = reinterpret_cast<PPHYSICAL_MEMORY_RUN>(&superfetchPhysicalRanges->Ranges[i]);
+        for (auto k = 0, i = 0; i < superfetch_physical_ranges_->RangeCount; i++) {
+            physical_memory_run = reinterpret_cast<PPHYSICAL_MEMORY_RUN>(&superfetch_physical_ranges_->Ranges[i]);
 
             for (SIZE_T j = physical_memory_run->BasePage; j < (physical_memory_run->BasePage + physical_memory_run->PageCount); j++) {
-                auto Pfn1 = &MmPfnDatabase->PageIdentities[k++];
-                Pfn1->PageFrameIndex = j;
+                auto pfn_1 = &mm_pfn_database->PageIdentities[k++];
+                pfn_1->PageFrameIndex = j;
             }
-            MmPfnDatabase->PfnCount = k;
+            mm_pfn_database->PfnCount = k;
         }
 
-        NTSTATUS st = QuerySuperfetchInfo(&sf_info);
+        NTSTATUS st = QuerySuperfetchInfo(&sf_info, nullptr);
         if (!NT_SUCCESS(st)) {
             std::cout << "[X] QueryMemoryPages failed: 0x" << std::hex << st << std::endl;
 
-            HeapFree(GetProcessHeap(), 0, MmPfnDatabase);
+            HeapFree(GetProcessHeap(), 0, mm_pfn_database);
             return -1;
         }
 
-        *pSuperfetchPages = MmPfnDatabase;
+        *superfetch_pages = mm_pfn_database;
 
         return 0;
     }

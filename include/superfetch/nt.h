@@ -1,7 +1,7 @@
 #pragma once
 
 #define SUPERFETCH_VERSION 45
-#define SUPERFETCH_MAGIC   'kuhC'
+#define SUPERFETCH_MAGIC   0x6b756843
 
 #define SystemSuperfetchInformation ((SYSTEM_INFORMATION_CLASS)79)
 
