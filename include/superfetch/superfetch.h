@@ -1,22 +1,61 @@
 #pragma once
 
+#include <Windows.h>
+#include <algorithm>
 #include <iostream>
 #include <ntstatus.h>
-#include <Windows.h>
+#include <unordered_map>
 #include <winternl.h>
 
 #include "nt.h"
 
-struct PfnList {
-    bool is_pool;
-    std::uint32_t pool_tag;
-};
+#define align_page 0xFFFULL
+
+// struct PfnListEntry {
+//     uintptr_t va = 0;
+//     std::uint32_t pool_tag = 0;
+//     BOOL is_pool = 0;
+// };
 
 class Superfetch {
 public:
     static Superfetch& GetInstance() {
+        static uintptr_t va;
         static Superfetch instance;
         return instance;
+    }
+    //
+    // THIS WILL NEVER WORK!!
+    // Well, unless you add some physical memory mapper and get the addresses perfect, mb. Ignore this, feel free to use it, but i don't even know if it'd work, and i haven't tested it, so i doubt it will.
+    // [[nodiscard]] static std::vector<PPOOL_HEADER> getPoolsWithTag(std::uint32_t tag) {
+    //     // horribly optimized just bad code in general but should worK?
+    //     std::vector<PPOOL_HEADER> pool_headers_with_tag = {};
+    //     auto item = translations_.begin();
+    //     while (item != translations_.end()) {
+    //         auto pool_header = reinterpret_cast<PPOOL_HEADER>(item->first);
+    //
+    //         if (pool_header->PoolTag == tag) {
+    //             pool_headers_with_tag.emplace_back(pool_header);
+    //         }
+    //
+    //         ++item;
+    //     }
+    //
+    //     return pool_headers_with_tag;
+    // }
+
+    [[nodiscard]] static uintptr_t translate(uintptr_t virtualaddress) {
+        uint64_t page_aligned = virtualaddress & ~align_page;
+
+        auto base = translations_.find(page_aligned);
+        // for (const auto& [key, value] : translations_) {
+        //     std::cout << key << " => " << value << "\n";
+        // }
+        if (base == translations_.end()) {
+            return 0;
+        }
+
+        return base->second + (static_cast<uint64_t>(virtualaddress) - page_aligned);
     }
 
     [[nodiscard]] static int ForceUpdateRanges() {
@@ -35,21 +74,23 @@ private:
     int refCount_ = 0;
     inline static PPF_MEMORY_RANGE_INFO superfetch_physical_ranges_;
     inline static PPF_PFN_PRIO_REQUEST pfn_ranges_;
+    inline static std::unordered_map<uint64_t, uintptr_t> translations_ = {};
 
     Superfetch() {
         refCount_++;
         int err{};
         try {
             err = SfSetupPrivileges();
-            if (err) { throw std::runtime_error("[iX] Failed to setup privileges (possibly need administrator privileges)"); };
+            if (err != 0) { throw std::runtime_error("[iX] Failed to setup privileges (possibly need administrator privileges)"); };
             err = SfSetupPages();
-            if (err) { throw std::runtime_error("[iX] Failed to setup superfetch pages"); }
+            if (err != 0) { throw std::runtime_error("[iX] Failed to setup superfetch pages"); }
         } catch (const std::runtime_error& e) {
-            std::cerr << e.what() << "(error: " << err << ")" << std::endl;
+            std::cerr << e.what() << "(error: " << err << ")" << '\n';
 
             superfetch_physical_ranges_ = nullptr;
             pfn_ranges_ = nullptr;
         }
+
     }
 
     [[nodiscard]] static int SfSetupPages()
@@ -71,21 +112,20 @@ private:
         NTSTATUS status = RtlAdjustPrivilege(SE_PROF_SINGLE_PROCESS_PRIVILEGE, TRUE, FALSE, &old);
 
         if (!NT_SUCCESS(status)) {
-            std::cout << "[X] Could not give SE_PROF_SINGLE_PROCESS_PRIVILEGE privilege to the process [possibly need administrator privileges] (0x" << std::hex << status << ")" << std::endl;
+            std::cout << "[X] Could not give SE_PROF_SINGLE_PROCESS_PRIVILEGE privilege to the process [possibly need administrator privileges] (0x" << std::hex << status << ")" << '\n';
             return -1;
         }
 
         status = RtlAdjustPrivilege(SE_DEBUG_PRIVILEGE, TRUE, FALSE, &old);
         if (!NT_SUCCESS(status)) {
-            std::cout << "[X] Could not give SE_DEBUG_PRIVILEGE privilege to the process [possibly need administrator privileges] (0x" << std::hex << status << ")" << std::endl;
+            std::cout << "[X] Could not give SE_DEBUG_PRIVILEGE privilege to the process [possibly need administrator privileges] (0x" << std::hex << status << ")" << '\n';
             return -1;
         }
 
         return 0;
     }
 
-    static NTSTATUS QuerySuperfetchInfo(SUPERFETCH_INFORMATION* superfetch_information, PULONG return_length) {
-
+    [[nodiscard]] static NTSTATUS QuerySuperfetchInfo(SUPERFETCH_INFORMATION* superfetch_information, PULONG return_length) {
         if (return_length != nullptr) {
             return NtQuerySystemInformation(SystemSuperfetchInformation, superfetch_information, sizeof(*superfetch_information), return_length);
         }
@@ -94,7 +134,7 @@ private:
     }
 
     template <typename T>
-    static SUPERFETCH_INFORMATION CreateSfInformation(SUPERFETCH_INFORMATION_CLASS superfetch_information_class, T* superfetch_information, SIZE_T superfetch_information_length) {
+    [[nodiscard]] static SUPERFETCH_INFORMATION CreateSfInformation(SUPERFETCH_INFORMATION_CLASS superfetch_information_class, T* superfetch_information, SIZE_T superfetch_information_length) {
         SUPERFETCH_INFORMATION sf_information{};
         sf_information.Version                     = SUPERFETCH_VERSION;
         sf_information.Magic                       = SUPERFETCH_MAGIC;
@@ -180,6 +220,12 @@ private:
         }
 
         *superfetch_pages = mm_pfn_database;
+        for (int i = 0; i < mm_pfn_database->PfnCount; i++ ) {
+            if (mm_pfn_database->PageIdentities[i].u1.e1.UseDescription == 4 || mm_pfn_database->PageIdentities[i].u1.e1.UseDescription == 5) { // i think uses less memory idk tho
+                translations_[mm_pfn_database->PageIdentities[i].u2.VirtualAddress] = mm_pfn_database->PageIdentities[i].PageFrameIndex * 4096;
+            }
+        }
+
 
         return 0;
     }

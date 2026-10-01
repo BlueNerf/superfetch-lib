@@ -122,6 +122,29 @@ typedef struct _MMPFN_IDENTITY
     } u2;
 } MMPFN_IDENTITY, *PMMPFN_IDENTITY;
 
+typedef struct _POOL_HEADER
+{
+    union
+    {
+        ULONG PreviousSize: 9;
+        struct
+        {
+            ULONG PoolIndex: 7;
+            ULONG BlockSize: 9;
+            ULONG PoolType: 7;
+        };
+        ULONG Ulong1;
+    };
+    union
+    {
+        ULONG PoolTag;
+        struct
+        {
+            WORD AllocatorBackTraceIndex;
+            WORD PoolTagHash;
+        };
+    };
+} POOL_HEADER, *PPOOL_HEADER;
 
 typedef struct _PFN_TRIPLET
 {
